@@ -1,0 +1,37 @@
+# Models (too large for git)
+models/
+
+# Environment
+.env
+venv/
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# Regenerable data (run pipeline to recreate)
+data/texts_normalized/
+data/segmented/
+data/dictionaries/final_dict.txt
+data/cuotuo_suiyue_resolved_temp.txt
+data/texts/corpus_statistics.txt
+*.pkl
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary parallel run files
+results/*_part*/
+results/*_part*.log
+
+# Large checkpoint files (only keep CSVs)
+results/**/*.npz
+
+# Log files
+*.log
+nohup.out
+
+# my own files
+misc/
+.vscode
