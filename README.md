@@ -101,10 +101,42 @@ This produces:
 
 ## Additional Scripts
 
+### Find Stable Words
+
+Identifies words with stable semantics across all periods by training TempRef models with common words as targets and measuring consecutive period similarities.
+
 ```bash
-# Find words with stable semantics across all periods (trains a TempRef model with 1000 common words as targets that will be tagged)
+# Single trial (quick test)
 python scripts/find_stable_words.py
 
+# Multiple trials to measure variance (recommended)
+python scripts/find_stable_words.py --trials 10
+
+# Run in background for long runs
+nohup python scripts/find_stable_words.py --trials 50 > stable_words.log 2>&1 &
+
+# Custom parameters
+python scripts/find_stable_words.py --trials 10 --num-targets 500 --min-freq 50 --epochs 5
+```
+
+| Option             | Default                            | Description                              |
+| ------------------ | ---------------------------------- | ---------------------------------------- |
+| `--trials`         | 1                                  | Number of training runs (different seed) |
+| `--base-seed`      | 42                                 | Base seed; trial i uses base_seed + i    |
+| `--num-targets`    | 1000                               | Number of target words to track          |
+| `--min-freq`       | 100                                | Minimum word frequency per period        |
+| `--min-word-length`| 2                                  | Minimum word length                      |
+| `--output`         | `models/tempref_stable_words.npy`  | Output path for final model              |
+| `--results`        | `results/word_stability_scores.csv`| Output path for results CSV              |
+
+**Output CSV columns:**
+- `rank`, `word`, `n_trials`
+- `mean_sim_mean`, `mean_sim_std` — average consecutive similarity across trials
+- `sim_{period1}_{period2}_mean`, `sim_{period1}_{period2}_std` — per-transition similarities
+
+### Other Scripts
+
+```bash
 # Train separate Word2Vec models per period and compare most similar words to "interiority"
 # Also compares results with the joint TempRef model; --min-freq filters by word frequency separately for each period
 python scripts/train_period_models.py --tempref-model models/tempref_interiority_w2v.npy --min-freq 10
@@ -133,7 +165,7 @@ The `semantic_change_multiseed.py` script estimates result stability and statist
 1. **Multi-seed stability**: Trains multiple times with different random seeds to measure variance from Word2Vec's stochastic training.
 2. **Permutation test**: Shuffles sentences across period labels to build a null distribution of change scores.
 
-### Quick Start
+### Quick Start (Sequential)
 
 ```bash
 nohup ./scripts/run_multiseed_analysis.sh > multiseed_analysis.log 2>&1 &
@@ -141,6 +173,30 @@ nohup ./scripts/run_multiseed_analysis.sh > multiseed_analysis.log 2>&1 &
 # Monitor progress: tail -f multiseed_analysis.log
 # Stop the process: pkill -f semantic_change_multiseed
 ```
+
+### Quick Start (Parallel)
+
+For faster execution on multi-core machines, use the parallel script:
+
+```bash
+# Run 100 trials across 4 parallel workers
+./scripts/run_multiseed_parallel.sh --trials 100 --workers 4
+
+# With custom epochs
+./scripts/run_multiseed_parallel.sh --trials 100 --workers 4 --epochs 3
+
+# Run in background
+nohup ./scripts/run_multiseed_parallel.sh --trials 100 --workers 4 > multiseed_analysis.log 2>&1 &
+```
+
+The parallel script:
+1. Splits null distribution trials across workers (non-overlapping seed ranges)
+2. Merges null results
+3. Splits multi-seed trials across workers
+4. Merges multi-seed results with p-values from null distribution
+5. Cleans up temporary directories
+
+Monitor individual worker progress with `tail -f results/null_distribution_part*.log` or `tail -f results/multiseed_part*.log`.
 
 Or run steps manually:
 

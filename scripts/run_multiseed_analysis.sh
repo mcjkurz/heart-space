@@ -2,7 +2,6 @@
 #
 # Run full multi-seed stability and significance analysis.
 # This script runs 100 null distribution trials followed by 100 multi-seed trials.
-# Expected runtime: ~10-12 hours (depending on hardware)
 #
 # Usage:
 #   ./scripts/run_multiseed_analysis.sh

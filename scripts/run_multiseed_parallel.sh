@@ -18,8 +18,8 @@ set -e
 
 # Default values
 TRIALS=100
-WORKERS=4
-EPOCHS=1
+WORKERS=3
+EPOCHS=3
 SEED_START=42
 OUTPUT_NULL="results/null_distribution"
 OUTPUT_MULTISEED="results/multiseed"
