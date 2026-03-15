@@ -1,28 +1,45 @@
 #!/usr/bin/env python3
 """
-Train separate Word2Vec models per period and compare similar words.
+Train separate Word2Vec models per period with multi-trial support.
 
-Also loads an existing TempRefWord2Vec model (if available) to compare
-temporal variant similarities.
+Supports training multiple models per period with different random seeds,
+parallel execution, and skip-if-exists logic.
 
 Usage (run from project root):
+  # Default: train 1 model per period (3 epochs, seed 42)
   python scripts/train_period_models.py
-  python scripts/train_period_models.py --replacement interiority --top-n 50
-  python scripts/train_period_models.py --tempref-model models/tempref_interiority_w2v.npy
+
+  # Train 10 models per period, 4 parallel processes, 5 epochs each
+  python scripts/train_period_models.py --trials 10 --processes 4 --epochs 5
+
+  # Custom output directory
+  python scripts/train_period_models.py --trials 10 --output-dir models/period_models/
 """
 
 import argparse
-import csv
 import os
-from collections import Counter
+import time
+from multiprocessing import Pool
 from typing import Dict, Iterable, List
 
-from tqdm.auto import tqdm
-from qhchina.analytics.word2vec import Word2Vec, TempRefWord2Vec
+from qhchina.analytics.word2vec import Word2Vec
 from qhchina.utils import LineSentenceFile
 
 
 PERIODS = ['mingqing', 'late_qing', 'republican', 'socialist', 'contemporary']
+
+MODEL_PARAMS = {
+    "vector_size": 200,
+    "window": 10,
+    "min_word_count": 3,
+    "sg": 1,
+    "negative": 10,
+    "alpha": 0.025,
+    "seed": 42,
+    "epochs": 3,
+    "calculate_loss": False,
+    "workers": 4,
+}
 
 
 class ReplacingLineSentenceFile:
@@ -36,20 +53,14 @@ class ReplacingLineSentenceFile:
         for sentence in LineSentenceFile(self.filepath):
             yield [self.replacements.get(word, word) for word in sentence]
 
-MODEL_PARAMS = {
-    "vector_size": 200,
-    "window": 10,
-    "min_word_count": 3,
-    "sg": 1,
-    "negative": 10,
-    "alpha": 0.025,
-    "seed": 42,
-    "epochs": 3
-}
 
-
-def load_target_words(words_file):
+def load_target_words(words_file: str) -> List[str]:
     """Load target words from a text file (one word per line)."""
+    if not os.path.exists(words_file):
+        raise FileNotFoundError(
+            f"Target words file not found: {words_file}\n"
+            f"Expected a text file with one word per line."
+        )
     with open(words_file, "r", encoding="utf-8") as f:
         words = [line.strip() for line in f if line.strip()]
     if not words:
@@ -57,7 +68,7 @@ def load_target_words(words_file):
     return words
 
 
-def load_period_sentences(data_dir, replacements=None):
+def load_period_sentences(data_dir: str, replacements: Dict[str, str] = None):
     """Load segmented sentences from per-period .txt files with optional replacement."""
     corpora = {}
     for period in PERIODS:
@@ -67,41 +78,66 @@ def load_period_sentences(data_dir, replacements=None):
                 corpora[period] = ReplacingLineSentenceFile(filepath, replacements)
             else:
                 corpora[period] = LineSentenceFile(filepath)
-    print(f"Loaded {len(corpora)} periods: {list(corpora.keys())}")
     return corpora
 
 
-def compute_word_frequencies(period_sentences):
-    """Compute word frequencies per period."""
-    print("\nComputing word frequencies...")
-    freqs = {}
-    for period in PERIODS:
-        if period in period_sentences:
-            freqs[period] = Counter()
-            for sentence in tqdm(period_sentences[period], desc=f"  {period}", leave=False):
-                freqs[period].update(sentence)
-    return freqs
+def make_model_filename(period: str, epochs: int, seed: int) -> str:
+    """Generate model filename: {period}_e{epochs}_s{seed}.npy"""
+    return f"{period}_e{epochs}_s{seed}.npy"
 
 
-def train_or_load_period_model(period, sentences, models_dir, params):
-    """Train a Word2Vec model for one period, or load if it already exists."""
-    model_path = os.path.join(models_dir, f"{period}_w2v.npy")
+def train_single_model(args: tuple) -> str:
+    """
+    Train a single Word2Vec model for one period and save it.
 
-    if os.path.exists(model_path):
-        print(f"  Loading existing model for {period}...")
-        return Word2Vec.load(model_path)
+    Top-level function for multiprocessing compatibility.
+    Returns a status message string.
+    """
+    (period, seed, data_dir, output_path, params, replacements) = args
 
-    print(f"  Training Word2Vec for {period}...")
-    model = Word2Vec(sentences=sentences, **params)
+    trial_params = params.copy()
+    trial_params["seed"] = seed
+
+    filepath = os.path.join(data_dir, f"sentences_{period}.txt")
+    if replacements:
+        sentences = ReplacingLineSentenceFile(filepath, replacements)
+    else:
+        sentences = LineSentenceFile(filepath)
+
+    model = Word2Vec(sentences=sentences, **trial_params)
     model.train()
-    model.save(model_path)
-    print(f"  Saved to {model_path}")
-    return model
+    model.save(output_path)
+
+    return f"Saved {output_path} (period={period}, seed={seed})"
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train per-period Word2Vec models and compare similar words."
+        description="Train per-period Word2Vec models with multi-trial support."
+    )
+    parser.add_argument(
+        "--trials", type=int, default=1,
+        help="Number of models to train per period (default: 1)"
+    )
+    parser.add_argument(
+        "--processes", type=int, default=1,
+        help="Number of parallel processes for training (default: 1)"
+    )
+    parser.add_argument(
+        "--output-dir", default="models/period_models",
+        help="Directory for saved .npy model files (default: models/period_models)"
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=3,
+        help="Training epochs per model (default: 3)"
+    )
+    parser.add_argument(
+        "--seed-start", type=int, default=42,
+        help="Starting seed; trial i uses seed_start + i (default: 42)"
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Re-train models even if output file already exists"
     )
     parser.add_argument(
         "--data-dir", default="data/segmented",
@@ -115,129 +151,95 @@ def main():
         "--replacement", default="interiority",
         help="Replacement token for target words (default: interiority)"
     )
+    parser.add_argument("--vector-size", type=int, default=None)
+    parser.add_argument("--window", type=int, default=None)
     parser.add_argument(
-        "--models-dir", default="models/period_models",
-        help="Directory for per-period model files"
+        "--min-count", type=int, default=None,
+        help="Minimum word count for model vocabulary (default: 3)"
     )
-    parser.add_argument(
-        "--tempref-model", default="models/tempref_interiority_w2v.npy",
-        help="Path to TempRefWord2Vec model for temporal variant comparison"
-    )
-    parser.add_argument(
-        "--output-dir", default="results",
-        help="Output directory for CSV results"
-    )
-    parser.add_argument(
-        "--top-n", type=int, default=50,
-        help="Number of similar words to show per period (default: 50)"
-    )
-    parser.add_argument(
-        "--min-freq", type=int, default=10,
-        help="Minimum word frequency in the respective period to include (default: 10)"
-    )
+
     args = parser.parse_args()
 
+    # Build model params
     params = MODEL_PARAMS.copy()
+    params["epochs"] = args.epochs
+    if args.vector_size is not None:
+        params["vector_size"] = args.vector_size
+    if args.window is not None:
+        params["window"] = args.window
+    if args.min_count is not None:
+        params["min_word_count"] = args.min_count
 
+    # Load target words and build replacements
     target_words = load_target_words(args.words)
-    print(f"Loaded {len(target_words)} target words, replacement: '{args.replacement}'")
     replacements = {word: args.replacement for word in target_words}
+    print(f"Loaded {len(target_words)} target words, replacement: '{args.replacement}'")
 
-    period_sentences_raw = load_period_sentences(args.data_dir)
-    period_sentences = load_period_sentences(args.data_dir, replacements=replacements)
-    period_freqs = compute_word_frequencies(period_sentences_raw)
-
-    os.makedirs(args.models_dir, exist_ok=True)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    period_results = {}
-
+    # Discover available periods
+    available_periods = []
     for period in PERIODS:
-        if period not in period_sentences:
-            print(f"  {period} not found, skipping...")
-            continue
+        filepath = os.path.join(args.data_dir, f"sentences_{period}.txt")
+        if os.path.exists(filepath):
+            available_periods.append(period)
+    print(f"Found {len(available_periods)} periods: {available_periods}")
 
-        model = train_or_load_period_model(
-            period, period_sentences[period], args.models_dir, params
-        )
+    # Build seed list and output paths, skipping existing models
+    os.makedirs(args.output_dir, exist_ok=True)
+    seeds = [args.seed_start + i for i in range(args.trials)]
+    jobs = []
+    skipped = 0
 
-        print(f"\n{'='*50}")
-        print(f"TOP {args.top_n} SIMILAR TO '{args.replacement}' IN {period.upper()}")
-        print(f"{'='*50}")
-
-        if args.replacement in model:
-            # Request more results to account for filtering
-            similar = model.most_similar(args.replacement, topn=args.top_n * 5)
-            # Filter by minimum frequency in this period
-            similar = [
-                (word, sim) for word, sim in similar
-                if period_freqs[period].get(word, 0) >= args.min_freq
-            ][:args.top_n]
-            period_results[period] = []
-            for i, (word, sim) in enumerate(similar, 1):
-                freq_str = ", ".join(
-                    f"{p[:3]}:{period_freqs[p].get(word, 0)}" for p in PERIODS
-                )
-                print(f"  {i:2}. {word}: {sim:.4f} ({freq_str})")
-                row = {"rank": i, "word": word, "similarity": sim}
-                for p in PERIODS:
-                    row[f"freq_{p}"] = period_freqs[p].get(word, 0)
-                period_results[period].append(row)
-        else:
-            print(f"  '{args.replacement}' not found in vocabulary")
-        print()
-
-    csv_path = os.path.join(args.output_dir, "period_model_similar_words.csv")
-    fieldnames = ["period", "rank", "word", "similarity"] + [f"freq_{p}" for p in PERIODS]
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for period in PERIODS:
-            for row in period_results.get(period, []):
-                writer.writerow({"period": period, **row})
-    print(f"Period model results saved to {csv_path}")
-
-    # Temporal variant comparison using TempRef model
-    if os.path.exists(args.tempref_model):
-        print("\n" + "=" * 50)
-        print("TEMPREF MODEL COMPARISON")
-        print("=" * 50)
-        tempref = TempRefWord2Vec.load(args.tempref_model)
-
-        tempref_results = []
-        for period in PERIODS:
-            variant = f"{args.replacement}_{period}"
-            try:
-                similar = tempref.most_similar(variant, topn=args.top_n * 5)
-            except KeyError:
-                print(f"  {variant}: not found in model")
+    for period in available_periods:
+        for seed in seeds:
+            filename = make_model_filename(period, args.epochs, seed)
+            output_path = os.path.join(args.output_dir, filename)
+            if os.path.exists(output_path) and not args.overwrite:
+                skipped += 1
                 continue
-            # Filter by minimum frequency in this period
-            similar = [
-                (word, sim) for word, sim in similar
-                if period_freqs[period].get(word, 0) >= args.min_freq
-            ][:args.top_n]
-            print(f"\nTop {args.top_n} similar to {variant}:")
-            for i, (word, sim) in enumerate(similar, 1):
-                freq_str = ", ".join(
-                    f"{p[:3]}:{period_freqs[p].get(word, 0)}" for p in PERIODS
-                )
-                print(f"  {word}: {sim:.4f} ({freq_str})")
-                row = {"period": period, "rank": i, "word": word, "similarity": sim}
-                for p in PERIODS:
-                    row[f"freq_{p}"] = period_freqs[p].get(word, 0)
-                tempref_results.append(row)
+            jobs.append((period, seed, args.data_dir, output_path, params, replacements))
 
-        tempref_csv = os.path.join(args.output_dir, "tempref_similar_words.csv")
-        with open(tempref_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in tempref_results:
-                writer.writerow(row)
-        print(f"\nTempRef results saved to {tempref_csv}")
+    if skipped > 0:
+        print(f"Skipping {skipped} already-trained model(s) (use --overwrite to re-train)")
+
+    if not jobs:
+        print("All models already exist. Nothing to do.")
+        return
+
+    # Print summary
+    print(f"\nModels to train: {len(jobs)} ({args.trials} trial(s) x {len(available_periods)} period(s))")
+    print(f"Seeds: {seeds[0]} to {seeds[-1]}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Processes: {args.processes}")
+    print(f"Output: {args.output_dir}")
+    print(f"Filename pattern: {{period}}_e{args.epochs}_s{{seed}}.npy")
+    print(f"Model params: {params}")
+    print()
+
+    # Dispatch training
+    def fmt_elapsed(start: float) -> str:
+        elapsed = int(time.time() - start)
+        h, remainder = divmod(elapsed, 3600)
+        m, s = divmod(remainder, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    t0 = time.time()
+
+    if args.processes <= 1 or len(jobs) == 1:
+        for i, task in enumerate(jobs, 1):
+            period, seed = task[0], task[1]
+            print(f"[{i}/{len(jobs)}] Training {period} seed {seed}...")
+            result = train_single_model(task)
+            print(f"  {result} [{fmt_elapsed(t0)} elapsed]")
     else:
-        print(f"\nTempRef model not found at {args.tempref_model}, skipping comparison.")
+        print(f"Launching {args.processes} parallel processes...")
+        with Pool(processes=args.processes) as pool:
+            for i, result in enumerate(pool.imap_unordered(train_single_model, jobs), 1):
+                print(f"  [{i}/{len(jobs)}] {result} [{fmt_elapsed(t0)} elapsed]")
+
+    total_elapsed = fmt_elapsed(t0)
+    print(f"\nDone! {len(jobs)} model(s) saved to {args.output_dir}/ [total: {total_elapsed}]")
 
 
 if __name__ == "__main__":
     main()
+

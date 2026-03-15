@@ -27,6 +27,7 @@ results/*_part*.log
 
 # Large checkpoint files (only keep CSVs)
 results/**/*.npz
+images/pca/
 
 # Log files
 *.log

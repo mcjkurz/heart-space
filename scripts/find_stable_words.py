@@ -4,16 +4,18 @@ Find the most semantically stable words across time periods.
 
 Identifies words that appear frequently in all periods, trains TempRef model(s)
 with them as targets, and ranks them by semantic stability. Supports multiple
-trials with different seeds to measure variance.
+trials with different seeds, parallel execution, and checkpoint/resume.
 
 Usage (run from project root):
   python scripts/find_stable_words.py
-  python scripts/find_stable_words.py --trials 10
+  python scripts/find_stable_words.py --trials 10 --processes 4
   python scripts/find_stable_words.py --min-freq 50 --trials 5 --resume
 """
 
 import argparse
 import os
+import time
+from multiprocessing import Pool
 
 import numpy as np
 from collections import Counter
@@ -91,6 +93,36 @@ def calculate_stability_scores(model, target_words):
             except Exception:
                 consecutive_sims.append(np.nan)
         scores[word] = consecutive_sims
+    return scores
+
+
+def train_single_trial(args: tuple) -> dict:
+    """
+    Train a single TempRefWord2Vec model and return stability scores.
+
+    This is a top-level function (required for multiprocessing pickling).
+    Accepts a single tuple argument for compatibility with Pool.map().
+
+    Returns:
+        A dict mapping word -> list of consecutive similarities.
+    """
+    seed, corpora_paths, target_words, params = args
+
+    trial_params = params.copy()
+    trial_params["seed"] = seed
+
+    corpora = {}
+    for period, filepath in corpora_paths.items():
+        corpora[period] = LineSentenceFile(filepath)
+
+    model = TempRefWord2Vec(
+        sentences=corpora,
+        targets=target_words,
+        **trial_params,
+    )
+    model.train()
+
+    scores = calculate_stability_scores(model, target_words)
     return scores
 
 
@@ -227,6 +259,10 @@ def main():
         "--resume", action="store_true",
         help="Resume from existing checkpoint if available"
     )
+    parser.add_argument(
+        "--processes", type=int, default=1,
+        help="Number of parallel processes for training (default: 1)"
+    )
     parser.add_argument("--vector-size", type=int, default=None)
     parser.add_argument("--window", type=int, default=None)
     parser.add_argument("--min-count", type=int, default=None)
@@ -272,33 +308,74 @@ def main():
             start_trial = n_completed
             print(f"Resumed from checkpoint: {n_completed} trials completed", flush=True)
 
-    model = None
-    print(f"Training {args.trials} trials with seeds {args.base_seed} to {args.base_seed + args.trials - 1}", flush=True)
-    for trial in range(start_trial, args.trials):
-        seed = args.base_seed + trial
-        print(f"Training trial {trial + 1}/{args.trials} with seed {seed}", flush=True)
-        trial_params = params.copy()
-        trial_params["seed"] = seed
+    # Build corpora paths for multiprocessing (can't pickle LineSentenceFile iterators)
+    corpora_paths = {}
+    for period in PERIODS:
+        filepath = os.path.join(args.data_dir, f"sentences_{period}.txt")
+        if os.path.exists(filepath):
+            corpora_paths[period] = filepath
 
-        model = TempRefWord2Vec(
-            sentences=corpora,
-            targets=target_words,
-            **trial_params,
-        )
-        model.train()
+    # Build task arguments for remaining trials
+    remaining_trials = args.trials - start_trial
+    seeds = [args.base_seed + i for i in range(start_trial, args.trials)]
 
-        scores = calculate_stability_scores(model, target_words)
-        all_trial_scores.append(scores)
+    def fmt_elapsed(start: float) -> str:
+        """Format elapsed time as HH:MM:SS."""
+        elapsed = int(time.time() - start)
+        h, remainder = divmod(elapsed, 3600)
+        m, s = divmod(remainder, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
-        save_checkpoint(all_trial_scores, checkpoint_path)
-        print(f"  Checkpoint saved ({trial + 1}/{args.trials} trials)", flush=True)
+    print(f"Training {remaining_trials} trials with seeds {seeds[0]} to {seeds[-1]}", flush=True)
+    print(f"Processes: {args.processes}", flush=True)
+
+    t0 = time.time()
+
+    if args.processes <= 1 or remaining_trials == 1:
+        # Sequential mode (supports checkpointing)
+        for trial in range(start_trial, args.trials):
+            seed = args.base_seed + trial
+            print(f"Training trial {trial + 1}/{args.trials} with seed {seed}...", flush=True)
+
+            task_args = (seed, corpora_paths, target_words, params)
+            scores = train_single_trial(task_args)
+            all_trial_scores.append(scores)
+
+            save_checkpoint(all_trial_scores, checkpoint_path)
+            print(f"  Checkpoint saved ({trial + 1}/{args.trials} trials) [{fmt_elapsed(t0)} elapsed]", flush=True)
+    else:
+        # Parallel mode
+        task_args = [(seed, corpora_paths, target_words, params) for seed in seeds]
+        print(f"Launching {args.processes} parallel processes...", flush=True)
+
+        with Pool(processes=args.processes) as pool:
+            for i, scores in enumerate(pool.imap_unordered(train_single_trial, task_args), 1):
+                all_trial_scores.append(scores)
+                save_checkpoint(all_trial_scores, checkpoint_path)
+                print(f"  [{i}/{remaining_trials}] Trial complete [{fmt_elapsed(t0)} elapsed]", flush=True)
+
+    # Train final model to save (using last seed)
+    print(f"\nTraining final model (seed {args.base_seed + args.trials - 1}) to save...", flush=True)
+    final_corpora = {period: LineSentenceFile(path) for period, path in corpora_paths.items()}
+    final_params = params.copy()
+    final_params["seed"] = args.base_seed + args.trials - 1
+    model = TempRefWord2Vec(
+        sentences=final_corpora,
+        targets=target_words,
+        **final_params,
+    )
+    model.train()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     model.save(args.output)
 
+    total_elapsed = fmt_elapsed(t0)
+    print(f"Done! {args.trials} trial(s) completed [total: {total_elapsed}]", flush=True)
+
     aggregated = aggregate_trial_scores(all_trial_scores, target_words)
-    print(f"Aggregated {len(aggregated)} scores", flush=True)
+    print(f"Aggregated {len(aggregated)} word scores", flush=True)
     save_results(aggregated, args.results)
+    print(f"Results saved to {args.results}", flush=True)
 
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
