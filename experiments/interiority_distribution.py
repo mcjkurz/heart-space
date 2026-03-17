@@ -46,9 +46,9 @@ def find_word_positions(text: str, words: list[str]) -> list[float]:
 def create_barcode_visualization(
     positions: list[float],
     output_path: str,
-    width_px: int = 1024,
-    height_px: int = 150,
-    dpi: int = 300
+    width_px: int = 2048,
+    height_px: int = 300,
+    dpi: int = 600
 ):
     """
     Create a barcode-style visualization of word positions.
@@ -64,14 +64,14 @@ def create_barcode_visualization(
     ax.set_ylim(0, 1)
     
     for pos in positions:
-        ax.axvline(x=pos, color='steelblue', linewidth=0.3, alpha=0.7)
+        ax.axvline(x=pos, color='steelblue', linewidth=0.8, alpha=0.7)
     
     ax.set_facecolor('white')
     fig.patch.set_facecolor('white')
     
     ax.set_xticks([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-    ax.set_xticklabels(['0%', '10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', '100%'], fontsize=3, color='black')
-    ax.tick_params(axis='x', length=1.5, width=0.5, pad=1, colors='black')
+    ax.set_xticklabels(['0%', '10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', '100%'], fontsize=11, color='black')
+    ax.tick_params(axis='x', length=3, width=0.5, pad=2, colors='black')
     ax.set_yticks([])
     
     for spine in ax.spines.values():
@@ -108,8 +108,8 @@ def main():
     create_barcode_visualization(
         positions,
         output_path,
-        width_px=1024,
-        height_px=150,
+        width_px=3072,
+        height_px=450,
         dpi=300
     )
     
