@@ -1,0 +1,10 @@
+jieba
+tqdm
+opencc
+seaborn
+numpy
+matplotlib
+scikit-learn
+pandas
+qhchina
+python-dotenv
