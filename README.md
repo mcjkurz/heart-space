@@ -136,7 +136,7 @@ python scripts/epoch_validation.py \
   --output-dir results/epoch_validation/
 ```
 
-**Stable words.** Trains its own models. Keeps words that occur at least `--min-freq` times in every period (default 100), then ranks them by how similar their vector stays from one period to the next. Higher `mean_sim_mean` means more stable. `--resume` continues from the checkpoint next to the CSV.
+**Stable words.** Trains its own models. Keeps words that occur at least `--min-freq` times in every period (default 100), then ranks them by how similar their vector stays from one period to the next. Higher `mean_sim_mean` means more stable. The trial models are not saved. Scores are kept in `results/word_stability_scores_checkpoint.npz` until the run finishes, then that file is deleted. `--resume` continues from it. One final model, trained with the last seed, is saved.
 
 ```bash
 python scripts/find_stable_words.py \
@@ -145,7 +145,7 @@ python scripts/find_stable_words.py \
   --min-freq 100
 ```
 
-Writes `results/word_stability_scores.csv` and `models/tempref_stable_words.npy`.
+Writes `results/word_stability_scores.csv` and `models/tempref_stable_words.npy`. Pass `--output` to save that model somewhere else.
 
 ## Other scripts
 
